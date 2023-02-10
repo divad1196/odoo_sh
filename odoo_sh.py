@@ -22,6 +22,24 @@ GITHUB_LOGIN = "https://github.com/session"
 
 
 
+def init_repository_data(session, repository_id):
+    payload = {
+        "jsonrpc":"2.0",
+        "id": None,
+        "method":"call",
+        "params":{
+            "repository_id": repository_id
+        },
+    }
+    res = session.post(
+        "https://www.odoo.sh/project/json/init",
+        headers={
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(payload)
+    )
+    return res.json()["result"]
+
 def get_branches_info(session, repository_id):
     res = session.post(
         "https://www.odoo.sh/web/dataset/call_kw/paas.repository/get_branches_info",
@@ -61,6 +79,85 @@ def get_projects_data(session):
             "url": url
         }
 
+
+def build_per_branch(session, branch_id, build_limit=2):
+    payload = {
+        "jsonrpc":"2.0",
+        "id": None,
+        "method":"call",
+        "params":{
+            "branch_id": branch_id,
+            "build_limit": build_limit,
+        },
+    }
+    res = session.post(
+        "https://www.odoo.sh/project/json/builds_per_branch",
+        headers={
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(payload)
+    )
+    return res.json()["result"]
+
+
+def list_backups(session, worker_url, build_id, branch, access_token):
+    payload = {
+        "jsonrpc":"2.0",
+        "id": None,
+        "method":"call",
+        "params":{
+            "token": access_token,
+        },
+    }
+    url = "{worker_url}/paas/build/{build_id}/backups/list?branch={branch}".format(
+        worker_url=worker_url,
+        build_id=build_id,
+        branch=branch,
+    )
+    res = session.post(
+        url,
+        headers={
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(payload)
+    )
+    return res.json()["result"]
+class OdooShProjectBranchBuildBackup:
+    def __init__(self, session, data, project):
+        self._session = session
+        self.project = project
+        self.name = data["name"]
+        self.branch = data["branch"]
+        self.type = data["type"]
+        self.path = data["path"]
+        self.downloadable = data["downloadable"]
+        self.backup_datetime_utc = data["backup_datetime_utc"]
+        self._data = data
+
+class OdooShProjectBranchBuild:
+    def __init__(self, session, data, project):
+        self._session = session
+        self.project = project
+        self.build_id = data["id"]
+        self.name = data["name"]
+        self.stage = data["stage"]
+        self.branch_id = data["branch_id"][0]
+        self.branch = data["branch_id"][1]
+        self.worker_url = data["worker_url"]
+        self._data = data
+        self._backups = None
+
+    @property
+    def backups(self):
+        if self._backups is None:
+            backups = []
+            self.worker_url
+            for data in list_backups(self._session, self.worker_url, self.build_id, self.branch, self.project.access_token):
+                b = OdooShProjectBranchBuildBackup(self._session, data, self.project)
+                backups.append(b)
+            self._backups = backups
+        return self._backups
+
 class OdooShProjectBranch:
     def __init__(self, session, data, project):
         self._session = session
@@ -69,6 +166,18 @@ class OdooShProjectBranch:
         self.name = data["name"]
         self.stage = data["stage"]
         self.project = project
+        self._builds = None
+        self._data = data
+    
+    @property
+    def builds(self):
+        if self._builds is None:
+            builds = []
+            for data in build_per_branch(self._session, self.branch_id)[0]["builds"]:
+                b = OdooShProjectBranchBuild(self._session, data, self.project)
+                builds.append(b)
+            self._builds = builds
+        return self._builds
     
     def __repr__(self) -> str:
         return repr({
@@ -87,6 +196,8 @@ class OdooShProject:
         self.url = data["url"]
         self.version = data["version"]
         self._repository_id = None
+        self._repository_data = None
+        self._access_token = None
         self._branches = None
         self._data = data
     
@@ -102,6 +213,19 @@ class OdooShProject:
             extra_data = self._extra_data()
             self._repository_id = extra_data["repository_id"]
         return self._repository_id
+    
+    @property
+    def repository_data(self):
+        if self._repository_data is None:
+            data = init_repository_data(self._session, self.repository_id)
+            self._repository_data = data
+        return self._repository_data
+
+    @property
+    def access_token(self):
+        if self._access_token is None:
+            self._access_token = self.repository_data["access_token"]
+        return self._access_token
 
     @property
     def branches(self):
@@ -116,7 +240,7 @@ class OdooShProject:
     def load_branches(self):
         branches = {}
         for data in get_branches_info(self._session, self.repository_id):
-            b = OdooShProjectBranch(self._session, data, self.name)
+            b = OdooShProjectBranch(self._session, data, self)
             branches[b.name] = b
         self._branches = branches
         return branches
